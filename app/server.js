@@ -1,11 +1,11 @@
 const express = require('express');
-const { Pool } = require('pg'); // Importa o driver do PostgreSQL
+const { Pool } = require('pg');
+const { createClient } = require('redis'); // Importa o cliente do Redis
 
 const PORT = 3000;
 const HOST = '0.0.0.0';
 
-// Configuração do Pool de Conexões com o PostgreSQL
-// As variáveis de ambiente são injetadas pelo docker-compose.yml
+// --- Conexões ---
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT,
@@ -14,11 +14,15 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
+const redisClient = createClient({
+  url: `redis://${process.env.REDIS_HOST}:${process.env.REDIS_PORT}`
+});
+redisClient.on('error', (err) => console.log('Redis Client Error', err));
+
 const app = express();
-// Middleware para conseguir ler o corpo (body) de requisições POST em JSON
 app.use(express.json());
 
-// Função para criar a tabela de URLs se ela não existir
+// --- Funções de Inicialização ---
 const createTable = async () => {
   const queryText = `
     CREATE TABLE IF NOT EXISTS urls (
@@ -28,26 +32,37 @@ const createTable = async () => {
       created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
   `;
-  try {
-    await pool.query(queryText);
-    console.log('Tabela "urls" verificada/criada com sucesso.');
-  } catch (err) {
-    console.error('Erro ao criar a tabela "urls":', err.stack);
+  await pool.query(queryText);
+  console.log('Tabela "urls" verificada/criada com sucesso.');
+};
+
+const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const connectWithRetry = async (serviceName, connectFn) => {
+  let retries = 5;
+  while (retries) {
+    try {
+      await connectFn();
+      console.log(`Conexão com ${serviceName} bem-sucedida.`);
+      break;
+    } catch (err) {
+      console.error(`Não foi possível conectar ao ${serviceName}:`, err.message);
+      retries -= 1;
+      console.log(`Tentativas restantes: ${retries}. Tentando novamente em 5 segundos...`);
+      if (retries === 0) {
+        console.error(`Não foi possível estabelecer conexão com ${serviceName}. Encerrando.`);
+        process.exit(1);
+      }
+      await wait(5000);
+    }
   }
 };
 
-// Endpoint de Health Check para verificar a conexão com o banco
-app.get('/health', async (req, res) => {
-  try {
-    const client = await pool.connect();
-    res.status(200).json({ status: 'OK', db_connection: 'connected' });
-    client.release(); // Libera o cliente de volta para o pool
-  } catch (err) {
-    res.status(500).json({ status: 'Error', db_connection: 'disconnected', error: err.message });
-  }
+// --- Endpoints da API ---
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', services: ['API', 'PostgreSQL', 'Redis'] });
 });
 
-// Endpoint para listar todas as URLs (exemplo)
 app.get('/urls', async (req, res) => {
   try {
     const result = await pool.query('SELECT id, original_url, short_code FROM urls ORDER BY created_at DESC');
@@ -57,15 +72,12 @@ app.get('/urls', async (req, res) => {
   }
 });
 
-// Endpoint para criar uma nova URL encurtada
 app.post('/urls', async (req, res) => {
   const { original_url } = req.body;
-  if (!original_url) {
-    return res.status(400).json({ error: 'original_url é obrigatório' });
-  }
-  // Lógica simples para gerar um código curto (em um projeto real, isso seria mais robusto)
+  if (!original_url) return res.status(400).json({ error: 'original_url é obrigatório' });
+  
   const short_code = Math.random().toString(36).substring(2, 8);
-
+  
   try {
     const queryText = 'INSERT INTO urls(original_url, short_code) VALUES($1, $2) RETURNING *';
     const result = await pool.query(queryText, [original_url, short_code]);
@@ -75,33 +87,47 @@ app.post('/urls', async (req, res) => {
   }
 });
 
-const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+// Endpoint principal: Redirecionamento com lógica de cache
+app.get('/:short_code', async (req, res) => {
+  const { short_code } = req.params;
 
-const startServer = async () => {
-  let retries = 5;
-  while (retries) {
-    try {
-      // Tenta se conectar e criar a tabela
-      const client = await pool.connect();
-      console.log('Conexão com o banco de dados bem-sucedida.');
-      
-      await createTable(); // A função que você já tem, para criar a tabela
-      
-      client.release();
-      break; // Sai do loop se tudo deu certo
-    } catch (err) {
-      console.error('Não foi possível conectar ao banco de dados:', err.message);
-      retries -= 1;
-      console.log(`Tentativas restantes: ${retries}. Tentando novamente em 5 segundos...`);
-      if (retries === 0) {
-        console.error('Não foi possível estabelecer conexão com o banco de dados após várias tentativas. Encerrando.');
-        process.exit(1); // Encerra a aplicação se não conseguir conectar
-      }
-      await wait(5000); // Espera 5 segundos antes de tentar novamente
+  try {
+    // 1. Tenta buscar no Cache (Redis) primeiro
+    const cachedUrl = await redisClient.get(short_code);
+
+    if (cachedUrl) {
+      console.log(`CACHE HIT: Redirecionando ${short_code} para ${cachedUrl}`);
+      return res.redirect(301, cachedUrl);
     }
-  }
 
-  // Só inicia o servidor Express se a conexão com o banco foi bem-sucedida
+    // 2. Se não achou no cache (CACHE MISS), busca no Banco de Dados (PostgreSQL)
+    console.log(`CACHE MISS: Buscando ${short_code} no banco de dados.`);
+    const dbResult = await pool.query('SELECT original_url FROM urls WHERE short_code = $1', [short_code]);
+
+    if (dbResult.rows.length > 0) {
+      const originalUrl = dbResult.rows[0].original_url;
+
+      // 3. Salva o resultado no cache para a próxima vez. Define uma expiração de 1 hora (3600s).
+      await redisClient.set(short_code, originalUrl, { EX: 3600 });
+      console.log(`SALVO NO CACHE: ${short_code} -> ${originalUrl}`);
+      
+      return res.redirect(301, originalUrl);
+    } else {
+      return res.status(404).json({ error: 'URL não encontrada' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// --- Inicialização do Servidor ---
+const startServer = async () => {
+  await connectWithRetry('PostgreSQL', () => pool.connect().then(client => client.release()));
+  await connectWithRetry('Redis', () => redisClient.connect());
+  
+  await createTable();
+  
   app.listen(PORT, HOST, () => {
     console.log(`Servidor Node.js rodando em http://${HOST}:${PORT}`);
   });

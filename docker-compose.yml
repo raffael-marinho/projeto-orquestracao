@@ -13,26 +13,30 @@ services:
     build:
       context: .
     depends_on:
-      - database  # <-- MUDANÇA: Agora a API depende do banco de dados.
-    environment:  # <-- NOVO: Variáveis de ambiente para a API se conectar ao banco.
+      - database
+      - cache     # <-- NOVO: A API agora também depende do cache
+    environment:
       - DB_HOST=database
       - DB_USER=myuser
       - DB_PASSWORD=mypassword
       - DB_NAME=urldb
       - DB_PORT=5432
+      - REDIS_HOST=cache    # <-- NOVO: Passando o host do Redis para a API
+      - REDIS_PORT=6379   # <-- NOVO: Porta padrão do Redis
 
-  # NOVO SERVIÇO: Nosso banco de dados PostgreSQL
   database:
-    image: postgres:15-alpine # Usamos uma imagem oficial e leve do PostgreSQL.
+    image: postgres:15-alpine
     environment:
       - POSTGRES_USER=myuser
       - POSTGRES_PASSWORD=mypassword
       - POSTGRES_DB=urldb
     volumes:
-      # Este é o segredo da persistência!
-      # Mapeia o volume 'postgres_data' para a pasta onde o PostgreSQL guarda seus dados.
       - postgres_data:/var/lib/postgresql/data
 
-# NOVO BLOCO: Declaramos o volume que será gerenciado pelo Docker.
+  # NOVO SERVIÇO: Nosso cache em memória
+  cache:
+    image: redis:7-alpine # Usando a imagem oficial e leve do Redis
+    restart: always       # É uma boa prática para um cache reiniciar automaticamente
+
 volumes:
   postgres_data: {}
