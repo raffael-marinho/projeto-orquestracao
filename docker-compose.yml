@@ -1,7 +1,7 @@
-version: '3.8'
 
 services:
   nginx:
+    # ... (sem mudanças aqui)
     build:
       context: ./nginx
     ports:
@@ -14,17 +14,26 @@ services:
       context: .
     depends_on:
       - database
-      - cache     # <-- NOVO: A API agora também depende do cache
+      - cache
+      - fluentd
     environment:
+      # ... (sem mudanças aqui)
       - DB_HOST=database
       - DB_USER=myuser
       - DB_PASSWORD=mypassword
       - DB_NAME=urldb
       - DB_PORT=5432
-      - REDIS_HOST=cache    # <-- NOVO: Passando o host do Redis para a API
-      - REDIS_PORT=6379   # <-- NOVO: Porta padrão do Redis
+      - REDIS_HOST=cache
+      - REDIS_PORT=6379
+    # MUDANÇA IMPORTANTE: Dizendo ao Docker para enviar os logs deste serviço para o Fluentd
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: host.docker.internal:24224
+        tag: "app.nodejs.{{.ID}}" # Etiqueta para identificar os logs
 
   database:
+    # ... (sem mudanças aqui)
     image: postgres:15-alpine
     environment:
       - POSTGRES_USER=myuser
@@ -33,10 +42,40 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # NOVO SERVIÇO: Nosso cache em memória
   cache:
-    image: redis:7-alpine # Usando a imagem oficial e leve do Redis
-    restart: always       # É uma boa prática para um cache reiniciar automaticamente
+    # ... (sem mudanças aqui)
+    image: redis:7-alpine
+    restart: always
+
+  # --- NOVOS SERVIÇOS DE LOGGING ---
+  fluentd:
+    build: ./fluentd
+    ports:
+      - "24224:24224"       # Porta para receber logs
+      - "24224:24224/udp"
+    depends_on:
+      - elasticsearch
+
+  elasticsearch:
+    image: elasticsearch:8.14.1 # Usando uma versão específica
+    environment:
+      - discovery.type=single-node # Essencial para rodar em um nó só
+      - xpack.security.enabled=false # Desabilita login/senha para simplificar
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # Limita o uso de memória
+    volumes:
+      - es_data:/usr/share/elasticsearch/data # Volume para persistir os dados do ES
+    ports:
+      - "9200:9200" # Porta da API do ES
+
+  kibana:
+    image: kibana:8.14.1 # A versão deve ser a mesma do Elasticsearch
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200 # Diz ao Kibana onde encontrar o ES
+    ports:
+      - "5601:5601" # Porta da interface web do Kibana
+    depends_on:
+      - elasticsearch
 
 volumes:
   postgres_data: {}
+  es_data: {} # Declara o novo volume para os dados do Elasticsearch
