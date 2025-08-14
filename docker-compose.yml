@@ -1,24 +1,38 @@
-# Define a versão do Docker Compose que estamos usando.
 version: '3.8'
 
-# A seção 'services' é onde definimos todos os nossos contêineres.
 services:
-  # 1. Nosso serviço de Load Balancer (o porteiro)
   nginx:
     build:
-      context: ./nginx  # Informa que o Dockerfile está na pasta './nginx'
+      context: ./nginx
     ports:
-      - "8080:80" # Mapeia a porta 8080 da sua máquina para a porta 80 do Nginx.
-                  # Esta é a ÚNICA porta que expomos publicamente!
+      - "8080:80"
     depends_on:
-      - app         # Diz ao Docker Compose para iniciar o serviço 'app' ANTES de iniciar o 'nginx'.
+      - app
 
-  # 2. Nosso serviço de API (o cérebro)
   app:
     build:
-      context: .      # Informa que o Dockerfile está na raiz do projeto (o que criamos no Passo 2)
-    # Não há mais seção 'ports' aqui! O acesso é feito via Nginx.
-    # O 'expose' no Dockerfile da API ainda é útil para documentar a porta interna.
+      context: .
+    depends_on:
+      - database  # <-- MUDANÇA: Agora a API depende do banco de dados.
+    environment:  # <-- NOVO: Variáveis de ambiente para a API se conectar ao banco.
+      - DB_HOST=database
+      - DB_USER=myuser
+      - DB_PASSWORD=mypassword
+      - DB_NAME=urldb
+      - DB_PORT=5432
 
-# A seção 'networks' define as redes virtuais. Se não definirmos, o Compose cria uma padrão.
-# Por enquanto, não precisamos nos preocupar com isso.
+  # NOVO SERVIÇO: Nosso banco de dados PostgreSQL
+  database:
+    image: postgres:15-alpine # Usamos uma imagem oficial e leve do PostgreSQL.
+    environment:
+      - POSTGRES_USER=myuser
+      - POSTGRES_PASSWORD=mypassword
+      - POSTGRES_DB=urldb
+    volumes:
+      # Este é o segredo da persistência!
+      # Mapeia o volume 'postgres_data' para a pasta onde o PostgreSQL guarda seus dados.
+      - postgres_data:/var/lib/postgresql/data
+
+# NOVO BLOCO: Declaramos o volume que será gerenciado pelo Docker.
+volumes:
+  postgres_data: {}
