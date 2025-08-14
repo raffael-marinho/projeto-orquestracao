@@ -1,0 +1,24 @@
+# Define a versão do Docker Compose que estamos usando.
+version: '3.8'
+
+# A seção 'services' é onde definimos todos os nossos contêineres.
+services:
+  # 1. Nosso serviço de Load Balancer (o porteiro)
+  nginx:
+    build:
+      context: ./nginx  # Informa que o Dockerfile está na pasta './nginx'
+    ports:
+      - "8080:80" # Mapeia a porta 8080 da sua máquina para a porta 80 do Nginx.
+                  # Esta é a ÚNICA porta que expomos publicamente!
+    depends_on:
+      - app         # Diz ao Docker Compose para iniciar o serviço 'app' ANTES de iniciar o 'nginx'.
+
+  # 2. Nosso serviço de API (o cérebro)
+  app:
+    build:
+      context: .      # Informa que o Dockerfile está na raiz do projeto (o que criamos no Passo 2)
+    # Não há mais seção 'ports' aqui! O acesso é feito via Nginx.
+    # O 'expose' no Dockerfile da API ainda é útil para documentar a porta interna.
+
+# A seção 'networks' define as redes virtuais. Se não definirmos, o Compose cria uma padrão.
+# Por enquanto, não precisamos nos preocupar com isso.
